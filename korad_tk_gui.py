@@ -7,10 +7,17 @@ import datetime
 import threading
 
 class KonradKontrolWindow(tk.Tk):
-    def __init__(self, port, channel_id, *args, **kwargs):
+    '''
+    Tk window that holds all of the channel widgets.  Each channel has its own frame tk.Frame object (KoradControlWidget)
+    which runs its update in a separate thread.  Since we only want to connect serial port to one KoradPowerSupply the
+    channels share the serial port connection, and some management of locking to not have two threads talking to the PS
+    at once are implemented in kontrol_korad.
+    '''
+    def __init__(self, port, channel_ids, *args, **kwargs):
         tk.Tk.__init__(self, *args, **kwargs)
         self.port = port
-        self.channel_id = channel_id
+        self.channel_ids = channel_ids
+        self.koradctl = korad.KoradPowerSupply(port=self.port)
         tk.Tk.wm_title(self,"Korad Kontrol")
         #self.geometry("800x200")
         self.create_widgets()
@@ -24,9 +31,10 @@ class KonradKontrolWindow(tk.Tk):
         self.date_time.pack()
         self.update_date_time()
         
-        self.channels = []
-        self.channels.append(KonradChannelWidget(self.port, self.channel_id))
-        self.channels[0].pack(side=tk.TOP)
+        self.channels = {}
+        for chan in self.channel_ids:
+            self.channels[chan] = KonradChannelWidget( self.koradctl, chan )
+            self.channels[chan].pack(side=tk.TOP)
 
         # quit button
         self.quit_button = ttk.Button(self, text="Quit", command=self.quit)
@@ -34,8 +42,7 @@ class KonradKontrolWindow(tk.Tk):
 
     def quit(self):
         print('quitting')
-        for channel in self.channels:
-            channel.korad.disconnect()
+        self.koradctl.disconnect()
         return super().quit()
 
     def update_date_time(self):
@@ -46,22 +53,20 @@ class KonradKontrolWindow(tk.Tk):
         self.after(1000, self.update_date_time) 
 
     def mainloop(self):
-        for channel in self.channels:
-            print('update channel:',channel.channel_id)
-            channel.update()
+        for chan in self.channel_ids:
+            print('update channel:', chan )
+            self.channels[chan].update()
         tk.Tk.update(self)
         tk.Tk.mainloop(self)
 
 class KonradChannelWidget(tk.Frame):
-    def __init__(self, port, channel_id, *args, **kwargs):
+    def __init__(self, koradctl, channel, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.port = port
-        self.channel_id = channel_id
+        self.koradctl = koradctl
+        self.channel = channel
 
         #self.title("Korad Kontrol")
         #self.geometry("600x300")
-
-        self.korad = korad.KoradPowerSupply(port=self.port, id=self.channel_id)
 
         self.create_widgets()
         self['padx'] = 5
@@ -77,7 +82,7 @@ class KonradChannelWidget(tk.Frame):
             The readbacks should update once every 15 seconds 
         '''
         # put channel id label at the top
-        self.channel_id_label = ttk.Label(self, text="Channel "+self.channel_id)
+        self.channel_id_label = ttk.Label(self, text="Channel "+self.channel )
         self.channel_id_label.pack(side=tk.TOP,pady=5)
 
 
@@ -87,7 +92,7 @@ class KonradChannelWidget(tk.Frame):
         self.voltage_frame.pack(side=tk.TOP,pady=5)
         self.voltage_label = ttk.Label(self.voltage_frame, text="V Set (V)")
         self.voltage_entry = ttk.Entry(self.voltage_frame, width=10)
-        voltage = self.korad.get_voltage_set()
+        voltage = self.koradctl.get_voltage_set( self.channel )
         print('voltage:',voltage)
         self.voltage_entry.insert(0,str(voltage))
         self.set_voltage_button = ttk.Button(self.voltage_frame, text="Set V", command=self.set_voltage)
@@ -105,7 +110,7 @@ class KonradChannelWidget(tk.Frame):
         self.current_frame.pack(side=tk.TOP,pady=5)
         self.current_label = ttk.Label(self.current_frame, text="I Set (A):")
         self.current_entry = ttk.Entry(self.current_frame,width=10)
-        current = self.korad.get_current_set()
+        current = self.koradctl.get_current_set( self.channel )
         print('current:',current)
         self.current_entry.insert(0,str(current))
         self.set_current_button = ttk.Button(self.current_frame, text="Set I", command=self.set_current)
@@ -129,24 +134,24 @@ class KonradChannelWidget(tk.Frame):
 
 
     def toggle_output(self):
-        if self.korad.get_output_onoff():
-            self.korad.turn_output_off()
+        if self.koradctl.get_output_onoff( self.channel ):
+            self.koradctl.turn_output_off( self.channel )
         else:
-            self.korad.turn_output_on()
+            self.koradctl.turn_output_on( self.channel )
         self.get_output()
 
     def set_voltage(self):
-        self.korad.set_voltage( float(self.voltage_entry.get()) )
+        self.koradctl.set_voltage( float(self.voltage_entry.get()), self.channel )
 
     def set_current(self):
-        self.korad.set_current( float(self.current_entry.get()) )
+        self.koradctl.set_current( float(self.current_entry.get()), self.channel )
 
     def get_voltage(self):
-        voltage = self.korad.get_voltage()
+        voltage = self.koradctl.get_voltage( self.channel )
         self.voltage_readback.config(text=str(voltage)+' V')
  
     def get_current(self):
-        current = self.korad.get_current()
+        current = self.koradctl.get_current( self.channel )
         self.current_readback.config(text=str(current)+' A')
 
     def get_output(self):
@@ -156,10 +161,10 @@ class KonradChannelWidget(tk.Frame):
         otherwise make it green. 
         '''
         voltage_set = float(self.voltage_entry.get())
-        voltage_read = self.korad.get_voltage()
+        voltage_read = self.koradctl.get_voltage( self.channel )
         current_set = float(self.current_entry.get())
-        current_read = self.korad.get_current()
-        if self.korad.get_output_onoff():
+        current_read = self.koradctl.get_current( self.channel )
+        if self.koradctl.get_output_onoff( self.channel ):
             self.output_button.config(text="Turn OFF")
             self.output_status_label.config(text="Output: ON")
             if abs(voltage_set-voltage_read) > 0.01:
@@ -198,10 +203,10 @@ if __name__ == '__main__':
 
     root.destroy()
 
-    # use argparse to get the port and id from the command line
+    # use argparse to get the port and channel numbers from the command line
     parser = argparse.ArgumentParser(description='Korad Kontrol')
-    parser.add_argument('--port', default='/dev/serial/by-id/usb-Nuvoton_KORAD_USB_Mode_002800D40252-if00',type=str, help='The serial port to use')
-    parser.add_argument('--id', default='01',type=str, help='The ID of the power supply')
+    parser.add_argument('--port', default='/dev/serial/by-id/usb-Nuvoton_KORAD_USB_Mode_000016E90000-if00',type=str, help='The serial port to use')
+    parser.add_argument('--id', default=['1','2','3','4'],nargs='+', help='List of channels')
     args = parser.parse_args()
 
     app = KonradKontrolWindow( args.port, args.id )
